@@ -4,15 +4,36 @@ A local AI-powered resume tailoring assistant. Upload your resume, optimize it f
 
 ---
 
+## What This Application Does
+
+You upload your resume once. After that, you just chat.
+
+Type anything — ask a question, say "tune for frontend engineer", or say "tune for data scientist and send to recruiter@company.com". The AI figures out what you want and handles it automatically.
+
+**Under the hood:**
+
+1. Every message goes to a single chat endpoint
+2. `llama3.1` reads your message and decides which tool(s) to call:
+   - **No tool** — answers your resume question directly using your uploaded resume as context
+   - **`tune_resume` tool** — `phi4-mini` rewrites your resume for the target role in real time, then generates a PDF and DOCX
+   - **`send_email` tool** — attaches the tuned resume PDF and sends it to the recruiter via Gmail
+3. If you ask to tune AND send in one message, the AI calls both tools back-to-back automatically
+4. Your name, phone, email, address, and all personal details are **never changed** — two layers of protection enforce this
+
+Everything runs locally. No data leaves your machine except the outbound application email.
+
+---
+
 ## Features
 
 - **Resume Q&A** — Ask anything about your uploaded resume
+- **MCP tool calling** — `llama3.1` autonomously routes tune and email requests as tool calls
 - **Role-based tuning** — AI rewrites your resume for a specific job role (ATS-optimized, stronger bullet points, tailored summary)
 - **PDF & DOCX generation** — Download your tuned resume in both formats instantly
 - **Auto-generated email** — AI drafts a professional job application email with your resume attached
-- **Email sending** — Send directly to a recruiter's inbox via Gmail SMTP
+- **Email sending** — Say "tune for X and send to recruiter@company.com" — AI handles both in one message
 - **Personal details protected** — Name, contact info, address are never altered during tuning
-- **Strict scope** — Rejects off-topic questions; only resume and hiring tasks are answered
+- **Strict scope** — Rejects off-topic questions; only resume and career tasks are answered
 
 ---
 
@@ -22,7 +43,7 @@ A local AI-powered resume tailoring assistant. Upload your resume, optimize it f
 |---|---|
 | Frontend | React 19, Vite, plain CSS-in-JS |
 | Backend | Node.js (ESM), Express |
-| AI / LLM | Ollama (`phi4-mini` for chat/tuning, `nomic-embed-text` for embeddings) |
+| AI / LLM | Ollama (`llama3.1` for tool calling, `phi4-mini` for tuning, `nomic-embed-text` for embeddings) |
 | Vector DB | Qdrant (local) |
 | PDF generation | pdfkit |
 | DOCX generation | docx |
@@ -39,6 +60,7 @@ A local AI-powered resume tailoring assistant. Upload your resume, optimize it f
     ```bash
     ollama pull phi4-mini
     ollama pull nomic-embed-text
+    ollama pull llama3.1
     ```
 - **Qdrant** running locally at `http://localhost:6333`
   ```bash
@@ -119,15 +141,21 @@ tune for frontend engineer
 optimize for backend developer role
 tailor for product manager at Acme Corp
 ```
-The AI rewrites your resume for that role in real time.
+The AI (`llama3.1`) detects the intent and calls the `tune_resume` tool automatically. `phi4-mini` rewrites your resume in real time.
 
-### 4. Download
+### 4. Tune and send in one message
+```
+tune for data scientist and send to recruiter@company.com
+```
+The AI calls `tune_resume` first, then `send_email` with the generated resume attached — no extra steps.
+
+### 5. Download
 Click **Download PDF** or **Download DOCX** to save your tuned resume.
 
-### 5. Send application email
-Enter the recruiter's email address. The AI pre-fills the subject and body — edit if needed — then click **Send Application Email**. Your tuned resume PDF is attached automatically.
+### 6. Send application email manually
+Enter the recruiter's email address in the email form below the tune result and click **Send Application Email**.
 
-### 6. Start over
+### 7. Start over
 Click **Start New** (top-right of the chat panel) to reset everything.
 
 ---

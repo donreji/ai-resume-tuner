@@ -4,29 +4,13 @@ import TuneResult from './TuneResult';
 const SUGGESTIONS = [
   'Tune for frontend engineer',
   'Optimize for backend developer role',
-  'Tailor for product manager position',
   'What are my strongest skills?',
-  'Summarize my experience',
   'Tune for data scientist role',
+  'Summarize my work experience',
   'How many years of experience do I have?',
-  'Optimize for full-stack developer',
+  'Tailor for product manager position',
+  'Tune for full-stack developer and send to recruiter@example.com',
 ];
-
-// Detect tune/optimize intent and extract role from message
-function detectTuneIntent(message) {
-  const tuneKeywords = /\b(tune|optimize|tailor|rewrite|customize|adapt|update)\b/i;
-  if (!tuneKeywords.test(message)) return null;
-
-  // Try to extract role: "tune for X role", "optimize for X position", "tune for X"
-  const roleMatch = message.match(/(?:for\s+(?:the\s+)?|for\s+)([a-zA-Z\s\-\/]+?)(?:\s+role|\s+position|\s+job)?\s*(?:and|,|at\s|\.|$)/i);
-  const role = roleMatch ? roleMatch[1].trim() : '';
-
-  // Try to extract company: "at CompanyName"
-  const companyMatch = message.match(/\bat\s+([A-Z][a-zA-Z\s]+?)(?:\s*,|\s*\.|$)/);
-  const company = companyMatch ? companyMatch[1].trim() : '';
-
-  return { isTune: true, role, company };
-}
 
 const card = {
   background: 'rgba(255,255,255,0.03)',
@@ -56,79 +40,32 @@ export default function ChatPanel({ currentResume, onStartNew }) {
     if (!text.trim() || streaming || !resumeReady) return;
     setInput('');
     setStreaming(true);
-
-    const tuneIntent = detectTuneIntent(text);
-
-    if (tuneIntent) {
-      await handleTune(text, tuneIntent);
-    } else {
-      await handleChat(text);
-    }
-
+    await handleChat(text);
     setStreaming(false);
   }
 
   async function handleChat(question) {
-    setMessages(prev => [...prev, { role: 'user', content: question }, { role: 'ai', content: '' }]);
+    setMessages(prev => [
+      ...prev,
+      { role: 'user', content: question },
+      { role: 'ai', content: '' },
+    ]);
+
+    let mode = 'ai'; // 'ai' | 'tune'
 
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question }),
-      });
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const payload = line.slice(6);
-          if (payload === '[DONE]') break;
-          try {
-            const { token, error } = JSON.parse(payload);
-            if (error) throw new Error(error);
-            if (token) {
-              setMessages(prev => {
-                const updated = [...prev];
-                updated[updated.length - 1] = { ...updated[updated.length - 1], content: updated[updated.length - 1].content + token };
-                return updated;
-              });
-            }
-          } catch { /* skip */ }
-        }
-      }
-    } catch (err) {
-      setMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: 'ai', content: `Error: ${err.message}` }; return u; });
-    }
-  }
-
-  async function handleTune(originalText, { role, company }) {
-    const label = role ? `Tuning for "${role}"…` : 'Tuning resume…';
-    // Add tune message slot
-    setMessages(prev => [...prev,
-      { role: 'user', content: originalText },
-      { role: 'tune', label, streamedText: '', tunedId: null, emailDraft: null, streaming: true },
-    ]);
-
-    try {
-      const res = await fetch('/api/tune', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ candidateId: currentResume.candidateId, role: role || 'the specified role', company }),
+        body: JSON.stringify({ question, candidateId: currentResume?.candidateId }),
       });
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let isDone = false;
 
-      while (true) {
+      while (!isDone) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
@@ -138,46 +75,130 @@ export default function ChatPanel({ currentResume, onStartNew }) {
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
           const payload = line.slice(6);
-          if (payload === '[DONE]') break;
+          if (payload === '[DONE]') { isDone = true; break; }
+
           try {
             const parsed = JSON.parse(payload);
             if (parsed.error) throw new Error(parsed.error);
 
             if (parsed.token) {
+              if (mode === 'tune') {
+                setMessages(prev => {
+                  const u = [...prev];
+                  const last = u[u.length - 1];
+                  if (last?.role === 'tune') {
+                    u[u.length - 1] = { ...last, streamedText: (last.streamedText || '') + parsed.token };
+                  }
+                  return u;
+                });
+              } else {
+                setMessages(prev => {
+                  const u = [...prev];
+                  const last = u[u.length - 1];
+                  if (last?.role === 'ai') {
+                    u[u.length - 1] = { ...last, content: last.content + parsed.token };
+                  }
+                  return u;
+                });
+              }
+            }
+
+            if (parsed.type === 'tool_start' && parsed.name === 'tune_resume') {
+              mode = 'tune';
+              const label = parsed.args?.role ? `Tuning for "${parsed.args.role}"…` : 'Tuning resume…';
               setMessages(prev => {
-                const updated = [...prev];
-                const last = updated[updated.length - 1];
-                updated[updated.length - 1] = { ...last, streamedText: last.streamedText + parsed.token };
-                return updated;
+                const u = [...prev];
+                if (u[u.length - 1]?.role === 'ai' && !u[u.length - 1].content) {
+                  u[u.length - 1] = { role: 'tune', label, streamedText: '', tunedId: null, emailDraft: null, streaming: true };
+                } else {
+                  u.push({ role: 'tune', label, streamedText: '', tunedId: null, emailDraft: null, streaming: true });
+                }
+                return u;
               });
             }
+
             if (parsed.type === 'files') {
               setMessages(prev => {
-                const updated = [...prev];
-                updated[updated.length - 1] = { ...updated[updated.length - 1], tunedId: parsed.tunedId };
-                return updated;
+                const u = [...prev];
+                if (u[u.length - 1]?.role === 'tune') {
+                  u[u.length - 1] = { ...u[u.length - 1], tunedId: parsed.tunedId };
+                }
+                return u;
               });
             }
+
             if (parsed.type === 'email') {
+              mode = 'ai';
               setMessages(prev => {
-                const updated = [...prev];
-                updated[updated.length - 1] = {
-                  ...updated[updated.length - 1],
-                  emailDraft: { subject: parsed.subject, body: parsed.body },
-                  streaming: false,
-                };
-                return updated;
+                const u = [...prev];
+                if (u[u.length - 1]?.role === 'tune') {
+                  u[u.length - 1] = {
+                    ...u[u.length - 1],
+                    emailDraft: { subject: parsed.subject, body: parsed.body },
+                    streaming: false,
+                  };
+                }
+                u.push({ role: 'ai', content: '' });
+                return u;
+              });
+            }
+
+            if (parsed.type === 'tool_start' && parsed.name === 'send_email') {
+              const emailTo = parsed.args?.to_email || '';
+              setMessages(prev => {
+                const u = [...prev];
+                const last = u[u.length - 1];
+                if (last?.role === 'ai') {
+                  u[u.length - 1] = { ...last, content: (last.content ? last.content + '\n' : '') + `Sending application to ${emailTo}…` };
+                } else {
+                  u.push({ role: 'ai', content: `Sending application to ${emailTo}…` });
+                }
+                return u;
+              });
+            }
+
+            if (parsed.type === 'tool_result' && parsed.name === 'send_email') {
+              const statusMsg = parsed.success
+                ? `Application sent to ${parsed.to}`
+                : `Email failed: ${parsed.error}`;
+              setMessages(prev => {
+                const u = [...prev];
+                const last = u[u.length - 1];
+                if (last?.role === 'ai') {
+                  u[u.length - 1] = { ...last, content: last.content.replace(/Sending application to .*?…/, statusMsg) };
+                }
+                return u;
               });
             }
           } catch (e) {
             if (e.message) {
-              setMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: 'tune', streamedText: `Error: ${e.message}`, tunedId: null, emailDraft: null, streaming: false }; return u; });
+              setMessages(prev => {
+                const u = [...prev];
+                const last = u[u.length - 1];
+                if (last?.role === 'ai') u[u.length - 1] = { ...last, content: `Error: ${e.message}` };
+                return u;
+              });
             }
           }
         }
       }
+
+      // Remove trailing empty AI message
+      setMessages(prev => {
+        const u = [...prev];
+        if (u[u.length - 1]?.role === 'ai' && !u[u.length - 1].content) u.pop();
+        return u;
+      });
     } catch (err) {
-      setMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: 'tune', streamedText: `Error: ${err.message}`, tunedId: null, emailDraft: null, streaming: false }; return u; });
+      setMessages(prev => {
+        const u = [...prev];
+        if (u[u.length - 1]?.role === 'ai') {
+          u[u.length - 1] = { role: 'ai', content: `Error: ${err.message}` };
+        } else {
+          u.push({ role: 'ai', content: `Error: ${err.message}` });
+        }
+        return u;
+      });
     }
   }
 
@@ -199,7 +220,7 @@ export default function ChatPanel({ currentResume, onStartNew }) {
       <div style={{ padding: '16px 20px', borderBottom: '1px solid rgba(255,255,255,0.06)', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
           <h2 style={{ color: '#fff', fontSize: 16, fontWeight: 600, margin: 0 }}>AI Resume Assistant</h2>
-          <p style={{ color: '#6b7280', fontSize: 13, margin: '3px 0 0' }}>Ask about your resume · type "tune for [role]" to optimize</p>
+          <p style={{ color: '#6b7280', fontSize: 13, margin: '3px 0 0' }}>Ask about your resume · AI auto-detects tune and email requests</p>
         </div>
         <button
           onClick={onStartNew}
@@ -223,7 +244,7 @@ export default function ChatPanel({ currentResume, onStartNew }) {
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
         {messages.length === 0 && resumeReady && (
           <div style={{ textAlign: 'center', paddingTop: 20 }}>
-            <p style={{ color: '#374151', fontSize: 13 }}>Ask a question or type "tune for [role]" to optimize your resume</p>
+            <p style={{ color: '#374151', fontSize: 13 }}>Ask a question or say "tune for [role]" — AI handles the rest</p>
           </div>
         )}
 
@@ -297,7 +318,7 @@ export default function ChatPanel({ currentResume, onStartNew }) {
           <input
             value={input}
             onChange={e => setInput(e.target.value)}
-            placeholder={resumeReady ? 'Ask about your resume or "tune for frontend engineer"…' : 'Upload resume first'}
+            placeholder={resumeReady ? 'Ask anything, "tune for [role]", or "tune and send to recruiter@…"' : 'Upload resume first'}
             disabled={!resumeReady || streaming}
             style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '10px 16px', color: '#fff', fontSize: 14, outline: 'none', opacity: (!resumeReady || streaming) ? 0.4 : 1 }}
             onFocus={e => e.currentTarget.style.borderColor = 'rgba(124,58,237,0.6)'}

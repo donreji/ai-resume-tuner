@@ -1,170 +1,187 @@
-IMPORTANT FEATURE UPDATE — AUTO EMAIL AFTER RESUME TUNING.
+# Spec v2 — AI Resume Tuner with MCP Tool Calling
 
-==================================================
-NEW FLOW
-==================================================
+## Overview
 
-After AI successfully tunes/optimizes the resume:
+Local AI-powered resume tailoring assistant. Upload a resume, ask the AI anything — it autonomously decides whether to answer a question, tune the resume, send an application email, or do all of the above in one message.
 
-1. Generate new tailored resume
-2. Create downloadable PDF/DOCX
-3. Automatically generate professional email
-4. Send email with tuned resume attached
+---
 
-==================================================
-UPDATED COMPLETE FLOW
-==================================================
+## Architecture
 
-Upload Resume
-→ User discusses target role
-→ AI tunes resume for role
-→ Generate optimized resume
-→ Generate PDF/DOCX
-→ Auto-generate professional job application email
-→ Attach tuned resume
-→ Send email
+| Layer | Technology |
+|---|---|
+| Frontend | React 19 + Vite |
+| Backend | Node.js ESM + Express |
+| Tool routing | Ollama `llama3.1` (tool/function calling) |
+| Resume tuning | Ollama `phi4-mini` (streaming) |
+| Embeddings | Ollama `nomic-embed-text` |
+| Vector DB | Qdrant (local) |
+| PDF | pdfkit |
+| DOCX | docx npm package |
+| Email | Nodemailer + Gmail SMTP |
 
-==================================================
-EMAIL FEATURE REQUIREMENTS
-==================================================
+---
 
-User can provide:
-- recruiter email
-- company name
-- role name
+## Complete Flow
 
-Example:
+```
+Upload resume
+  → User sends any message
+  → llama3.1 routes the intent (tool call or direct answer)
+      ├── Q&A → answer from RAG context
+      ├── tune_resume tool → phi4-mini rewrites resume → PDF + DOCX generated
+      └── send_email tool → attach PDF → send via Gmail SMTP
+  → Frontend renders result inline in chat
+```
 
-"Send tuned resume to hr@company.com for frontend engineer role"
+---
 
-==================================================
-EMAIL CONTENT GENERATION
-==================================================
+## MCP Tool Calling
 
-AI should generate:
-- professional subject
-- concise recruiter-friendly body
-- role-specific messaging
+The `/chat` endpoint uses `llama3.1` with two tools defined. The AI decides autonomously which tool(s) to call based on the user message.
 
-==================================================
-EMAIL TEMPLATE EXAMPLE
-==================================================
+### Tool: `tune_resume`
 
-Subject:
-Application for Frontend Engineer Role
+Called when user asks to tune, optimize, tailor, customize, or rewrite their resume.
 
-Body:
-Hello Hiring Team,
+Parameters:
+- `role` (required) — target job role, e.g. `"frontend engineer"`
+- `company` (optional) — target company name
 
-Please find attached my updated resume tailored for the Frontend Engineer position.
+What happens:
+1. Backend emits `{ type: 'tool_start', name: 'tune_resume', args }` SSE event
+2. `phi4-mini` rewrites the resume (tokens stream live to the UI)
+3. Sections parsed, original name/contact hard-enforced
+4. PDF + DOCX generated, saved to `tuned/{tunedId}/`
+5. Backend emits `{ type: 'files', tunedId }` and `{ type: 'email', subject, body }` SSE events
 
-I believe my experience with React, Next.js, and modern frontend development aligns well with the role requirements.
+### Tool: `send_email`
 
-Looking forward to hearing from you.
+Called when user provides a recruiter email address and wants to send their application.
 
-Best regards,
-Candidate Name
+Parameters:
+- `to_email` (required) — recruiter's email address
+- `tuned_id` (required) — ID from a prior `tune_resume` call
 
-==================================================
-IMPORTANT EMAIL RULES
-==================================================
+What happens:
+1. Backend emits `{ type: 'tool_start', name: 'send_email', args }` SSE event
+2. Reads `tuned/{tunedId}/resume.pdf` and `metadata.json`
+3. Sends via nodemailer with PDF attached
+4. Backend emits `{ type: 'tool_result', name: 'send_email', success, to }` SSE event
 
-AI must:
-- keep email professional
-- concise
-- recruiter-friendly
-- avoid overly generic AI wording
+### Same-turn tune + send
 
-==================================================
-ATTACHMENT REQUIREMENT
-==================================================
+When the user says "tune for X and send to recruiter@company.com" in a single message:
+1. `llama3.1` calls `tune_resume` → backend executes, returns `tunedId`
+2. `llama3.1` calls `send_email` with `tunedId` from step 1
+3. Backend uses a `pendingTunedId` fallback if the AI omits the `tuned_id`
 
-Attach:
-- newly generated tuned resume PDF
-- optionally DOCX
+---
 
-NOT original resume.
+## Tool Calling Loop
 
-==================================================
-BACKEND REQUIREMENTS
-==================================================
+`routes/chat.js` runs a loop (max 5 iterations):
 
-Implement:
-- PDF generation
-- DOCX generation
-- email sending
-- attachment support
+```
+callWithTools(messages)
+  if tool_calls:
+    for each tool call:
+      execute tool → emit SSE events → push tool result to messages
+    repeat loop
+  else:
+    emit final text response → done
+```
 
-==================================================
-EMAIL TECH STACK
-==================================================
+---
 
-Use:
-- Nodemailer
-- SMTP support
-- Gmail/App Password support
+## Personal Details Protection
 
-==================================================
-NEW UI REQUIREMENTS
-==================================================
+Two-layer enforcement — AI never alters name, email, phone, address, or any contact info:
 
-After tuning completes:
+1. **Prompt** — `TUNE_SYSTEM` explicitly forbids changing `---NAME---` and `---CONTACT---`
+2. **Code** — `extractOriginalDetails()` reads the original uploaded text and overwrites whatever the AI generated
 
-Show:
-- Resume Preview
-- Download PDF button
-- Download DOCX button
-- Recruiter Email Input
-- Send Email button
+---
 
-==================================================
-CHAT EXAMPLES
-==================================================
+## SSE Event Types
 
-- "Tune this for frontend role and send email"
-- "Optimize for backend engineer and email recruiter"
-- "Tailor this for product engineer role"
-- "Generate updated resume and send application"
+All communication from `/chat` is via Server-Sent Events:
 
-==================================================
-STRICT APPLICATION SCOPE
-==================================================
+| Event | Payload | Meaning |
+|---|---|---|
+| `token` | `{ token }` | AI text chunk (Q&A reply or final summary) |
+| `tool_start` | `{ type, name, args }` | Tool about to execute |
+| `token` (during tune) | `{ token }` | Tuned resume content streaming |
+| `files` | `{ type, tunedId }` | PDF + DOCX ready |
+| `email` | `{ type, subject, body }` | AI-generated email draft ready |
+| `tool_result` | `{ type, name, success, to? }` | Tool execution result |
 
-This application ONLY supports:
-- resume tuning
-- resume optimization
-- recruiter-focused resume rewriting
-- role-based tailoring
-- sending tuned resumes
+---
 
-If unrelated question asked:
+## Chat Examples
 
-Respond ONLY:
-"This assistant only supports resume optimization and candidate screening tasks."
+```
+"Tune for senior frontend engineer"
+"Optimize for backend developer role"
+"Tailor for product manager at Acme Corp"
+"Tune for data scientist and send to recruiter@company.com"
+"What are my strongest skills?"
+"How many years of experience do I have?"
+```
 
-==================================================
-IMPORTANT AI RULES
-==================================================
+---
 
-AI must NOT:
-- invent fake experience
-- invent fake companies
+## UI Behavior
+
+- All messages go through a single chat input — no separate tune button
+- When `tune_resume` tool fires: a **TuneResult** card appears inline with streaming preview
+- After tuning: Download PDF + Download DOCX buttons appear; email form pre-filled from AI draft
+- When `send_email` tool fires: status line shown in AI message bubble
+- Regular Q&A renders as plain AI message bubbles
+
+---
+
+## AI Rules
+
+Must NOT:
+- invent fake experience, companies, or qualifications
 - exaggerate skills unrealistically
+- alter name, contact, address, phone, or any personal detail
 
-AI should:
-- optimize wording
-- improve ATS compatibility
-- emphasize relevant experience
-- preserve truthful information
+Should:
+- optimize wording, action verbs, ATS keywords
+- reorder skills by relevance to target role
+- tailor professional summary
+- preserve all factual information
 
-==================================================
-FINAL GOAL
-==================================================
+---
 
-Create a local AI-powered resume tailoring assistant that:
+## Strict Scope
 
-- accepts uploaded resumes
-- rewrites resumes for target roles
-- generates ATS-friendly optimized resumes
-- creates downloadable files
-- automatically sends professional job application emails with the tuned resume attached
+Only supports resume and career topics. For anything unrelated:
+
+> "This assistant only supports resume optimization and career tasks."
+
+---
+
+## Environment
+
+`backend/.env`:
+```
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_USER=your@gmail.com
+EMAIL_PASS=your_app_password
+```
+
+Use a Gmail App Password — not your regular Gmail password.
+
+---
+
+## Required Ollama Models
+
+```bash
+ollama pull llama3.1          # tool routing
+ollama pull phi4-mini         # resume tuning
+ollama pull nomic-embed-text  # embeddings
+```
